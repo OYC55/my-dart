@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import io
+import re
 import sqlite3
 import time
 import zipfile
@@ -78,6 +79,14 @@ def _check_status(payload: dict) -> None:
         raise DartError(f"[{status}] {payload.get('message', '알 수 없는 오류')}")
 
 
+def redact(text: str) -> str:
+    """에러 메시지에 인증키가 그대로 노출되지 않도록 crtfc_key 값을 가린다."""
+    return re.sub(r"(crtfc_key=)[^&\s'\"]+", r"\1***", str(text))
+
+
+_redact = redact
+
+
 def _request_with_retry(
     url: str, params: dict, timeout: int = 20, retries: int = 3
 ) -> requests.Response:
@@ -95,8 +104,8 @@ def _request_with_retry(
     raise DartConnectionError(
         f"DART 서버에 연결할 수 없습니다({retries}회 재시도 실패). "
         f"배포 환경의 네트워크가 opendart.fss.or.kr 접속을 막고 있을 수 있습니다. "
-        f"원인: {last_exc}"
-    ) from last_exc
+        f"원인: {_redact(str(last_exc))}"
+    ) from None
 
 
 def _get_json(path: str, params: dict, api_key: str, timeout: int = 20) -> dict:

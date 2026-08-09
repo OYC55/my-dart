@@ -56,7 +56,7 @@ with st.sidebar:
                 n = api.download_corp_codes(api_key)
             st.success(f"상장기업 {n:,}개 목록 확보")
         except api.DartError as e:
-            st.error(f"기업 목록 다운로드 실패: {e}")
+            st.error(f"기업 목록 다운로드 실패: {api.redact(e)}")
             st.stop()
 
         progress_bar = st.progress(0.0)
@@ -71,7 +71,7 @@ with st.sidebar:
             api.build_industry_cache(api_key, progress_cb=_cb)
             st.success("업종코드 캐시 구축 완료")
         except Exception as e:
-            st.error(f"업종코드 캐시 구축 중 오류: {e}")
+            st.error(f"업종코드 캐시 구축 중 오류: {api.redact(e)}")
         st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -155,7 +155,7 @@ if run:
         try:
             base_fin = api.get_financials(api_key, corp_codes, str(base_year), reprt_code)
         except api.DartError as e:
-            st.error(str(e))
+            st.error(api.redact(e))
             st.stop()
 
     ranked_all = sorted(
@@ -178,7 +178,7 @@ if run:
                 fin = api.get_financials(api_key, ranked, yr, reprt_code)
                 auditors = api.get_auditors_bulk(api_key, ranked, yr, reprt_code)
             except api.DartError as e:
-                st.error(f"{yr}년 데이터 조회 실패: {e}")
+                st.error(f"{yr}년 데이터 조회 실패: {api.redact(e)}")
                 st.stop()
         for c in ranked:
             f = fin.get(c, {})
