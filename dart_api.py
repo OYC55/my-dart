@@ -221,45 +221,84 @@ def build_industry_cache(
 
 @dataclass
 class IndustryGroup:
-    induty_code: str
+    group_key: str
     count: int
     sample_names: list[str]
 
 
-def list_industry_groups(min_count: int = 1) -> list[IndustryGroup]:
-    conn = _connect()
-    try:
-        rows = conn.execute(
-            """SELECT induty_code, corp_name FROM corp
-               WHERE stock_code != '' AND induty_code IS NOT NULL
-               ORDER BY induty_code"""
-        ).fetchall()
-    finally:
-        conn.close()
-
-    groups: dict[str, list[str]] = {}
-    for induty_code, corp_name in rows:
-        groups.setdefault(induty_code, []).append(corp_name)
-
-    result = [
-        IndustryGroup(code, len(names), names[:4])
-        for code, names in groups.items()
-        if len(names) >= min_count
-    ]
-    result.sort(key=lambda g: g.induty_code)
-    return result
-
-
-def companies_in_industry(induty_code: str) -> list[tuple[str, str, str]]:
-    """(corp_code, corp_name, stock_code) 목록"""
+def _all_corp_industry_rows() -> list[tuple[str, str, str]]:
+    """(corp_code, corp_name, induty_code) - 업종코드가 있는 상장기업 전체."""
     conn = _connect()
     try:
         return conn.execute(
-            "SELECT corp_code, corp_name, stock_code FROM corp WHERE induty_code = ?",
-            (induty_code,),
+            """SELECT corp_code, corp_name, induty_code FROM corp
+               WHERE stock_code != '' AND induty_code IS NOT NULL"""
         ).fetchall()
     finally:
         conn.close()
+
+
+def _resolve_group_map(rows: list[tuple[str, str, str]]) -> dict[str, str]:
+    """corp_code -> group_key(업종코드 앞 4자리).
+
+    DART company.json의 induty_code는 회사마다 자릿수가 제각각이다(예: 게임업종이
+    '582'/'5821'/'58211'/'58212'로 혼재). 기본은 앞 4자리로 묶되, 4자리보다 짧은
+    코드(예: '582')는 그 코드로 시작하는 4자리 그룹이 정확히 하나만 있으면 그 그룹에
+    합류시킨다 (분류가 더 상세하게 된 형제 그룹으로 병합). 애매하면(형제 그룹이
+    0개거나 2개 이상) 병합하지 않고 그대로 둔다.
+    """
+    long_keys = {code[:4] for _, _, code in rows if len(code) >= 4}
+
+    def resolve(code: str) -> str:
+        if len(code) >= 4:
+            return code[:4]
+        candidates = [k for k in long_keys if k.startswith(code)]
+        return candidates[0] if len(candidates) == 1 else code
+
+    return {corp_code: resolve(code) for corp_code, _, code in rows}
+
+
+def list_industry_groups(min_count: int = 1) -> list[IndustryGroup]:
+    rows = _all_corp_industry_rows()
+    group_map = _resolve_group_map(rows)
+
+    groups: dict[str, list[str]] = {}
+    for corp_code, corp_name, _ in rows:
+        groups.setdefault(group_map[corp_code], []).append(corp_name)
+
+    result = [
+        IndustryGroup(key, len(names), sorted(names)[:6])
+        for key, names in groups.items()
+        if len(names) >= min_count
+    ]
+    result.sort(key=lambda g: g.group_key)
+    return result
+
+
+def companies_in_industry(group_key: str) -> list[tuple[str, str, str]]:
+    """(corp_code, corp_name, stock_code) 목록."""
+    rows = _all_corp_industry_rows()
+    group_map = _resolve_group_map(rows)
+    corp_codes = {c for c, _, _ in rows if group_map[c] == group_key}
+
+    conn = _connect()
+    try:
+        return conn.execute(
+            f"SELECT corp_code, corp_name, stock_code FROM corp WHERE corp_code IN "
+            f"({','.join('?' * len(corp_codes))})",
+            tuple(corp_codes),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def find_company_group(name_query: str, limit: int = 10) -> list[tuple[str, str]]:
+    """회사명으로 검색해 (회사명, group_key) 목록을 반환한다."""
+    rows = _all_corp_industry_rows()
+    group_map = _resolve_group_map(rows)
+    q = name_query.strip()
+    matches = [(corp_code, corp_name) for corp_code, corp_name, _ in rows if q in corp_name]
+    return [(name, group_map[corp_code]) for corp_code, name in matches[:limit]]
 
 
 # ---------------------------------------------------------------------------

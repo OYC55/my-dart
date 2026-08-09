@@ -87,12 +87,33 @@ if not groups:
 group_options: dict[str, str] = {}
 for g in groups:
     sample = ", ".join(g.sample_names)
-    label = f"{label_for(g.induty_code)} — {g.count}개사 (예: {sample} 등)"
-    group_options[label] = g.induty_code
+    label = f"{label_for(g.group_key)} — {g.count}개사 (예: {sample} 등)"
+    group_options[label] = g.group_key
+
+labels_list = list(group_options.keys())
+keys_list = list(group_options.values())
+
+name_query = st.text_input(
+    "회사명으로 업종 빠르게 찾기 (선택)",
+    placeholder="예: 크래프톤, 삼성전자, 카카오게임즈",
+    help="업종 코드 자체는 회사마다 표기 자릿수가 달라(예: 게임업종이 '582'/'5821'/'58211' 등으로 혼재) "
+    "아는 회사명을 검색해 어느 그룹에 속하는지 먼저 확인하는 게 정확합니다.",
+)
+default_index = 0
+if name_query:
+    matches = api.find_company_group(name_query)
+    if matches:
+        found_keys = sorted({gk for _, gk in matches}, key=lambda k: keys_list.index(k) if k in keys_list else 999)
+        preview = ", ".join(f"{nm}→{label_for(gk)}" for nm, gk in matches[:5])
+        st.caption(f"검색 결과: {preview}")
+        if found_keys and found_keys[0] in keys_list:
+            default_index = keys_list.index(found_keys[0])
+    else:
+        st.caption("일치하는 회사가 없습니다. 업종코드 캐시가 아직 없거나 비상장사일 수 있습니다.")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    selected_label = st.selectbox("① 업종 선택", list(group_options.keys()))
+    selected_label = st.selectbox("① 업종 선택", labels_list, index=default_index)
     selected_induty = group_options[selected_label]
 with col2:
     top_n = st.number_input("② 상위 몇 개 회사?", min_value=1, max_value=100, value=10, step=1)
