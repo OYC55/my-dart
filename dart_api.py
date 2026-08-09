@@ -333,6 +333,38 @@ def find_company_group(name_query: str, limit: int = 10) -> list[tuple[str, str]
     return [(name, group_map[corp_code]) for corp_code, name in matches[:limit]]
 
 
+def search_companies(name_query: str, limit: int = 15) -> list[tuple[str, str, str]]:
+    """업종 무관, 회사명으로 상장기업을 검색한다. (corp_code, corp_name, stock_code) 목록."""
+    q = name_query.strip()
+    if not q:
+        return []
+    conn = _connect()
+    try:
+        return conn.execute(
+            "SELECT corp_code, corp_name, stock_code FROM corp "
+            "WHERE stock_code != '' AND corp_name LIKE ? ORDER BY corp_name LIMIT ?",
+            (f"%{q}%", limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def corp_info(corp_codes: list[str]) -> dict[str, tuple[str, str]]:
+    """corp_code -> (corp_name, stock_code)"""
+    if not corp_codes:
+        return {}
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"SELECT corp_code, corp_name, stock_code FROM corp WHERE corp_code IN "
+            f"({','.join('?' * len(corp_codes))})",
+            tuple(corp_codes),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
 # ---------------------------------------------------------------------------
 # 3. 매출액 / 영업이익 (다중회사 주요계정, 최대 100개사/호출)
 # ---------------------------------------------------------------------------

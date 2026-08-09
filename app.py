@@ -138,8 +138,64 @@ st.caption(f"조회 연도: {', '.join(years)}")
 
 run = st.button("🔍 분석 실행", type="primary", disabled=not api_key)
 
+
 # ---------------------------------------------------------------------------
-# 분석 실행
+# 조회 + 표 생성 (최초 실행/구성 편집 후 재계산에서 공용으로 사용)
+# ---------------------------------------------------------------------------
+def _build_result(corp_codes: list[str], years: list[str], reprt_code: str) -> pd.DataFrame | None:
+    info = api.corp_info(corp_codes)
+    corp_codes = [c for c in corp_codes if c in info]  # 존재하지 않는 코드는 무시
+    if not corp_codes:
+        return None
+
+    with st.spinner(f"{years[0]}년 매출액 기준 순위 계산 중..."):
+        try:
+            base_fin = api.get_financials(api_key, corp_codes, years[0], reprt_code)
+        except api.DartError as e:
+            st.error(api.redact(e))
+            return None
+
+    ranked = sorted(
+        corp_codes,
+        key=lambda c: (base_fin.get(c, {}).get("revenue") is None, -(base_fin.get(c, {}).get("revenue") or 0)),
+    )
+    rank_map = {c: i for i, c in enumerate(ranked, start=1)}
+
+    rows = []
+    progress = st.progress(0.0)
+    for i, yr in enumerate(years):
+        with st.spinner(f"{yr}년 매출액/영업이익/감사인 조회 중..."):
+            try:
+                fin = base_fin if yr == years[0] else api.get_financials(api_key, ranked, yr, reprt_code)
+                auditors = api.get_auditors_bulk(api_key, ranked, yr, reprt_code)
+            except api.DartError as e:
+                st.error(f"{yr}년 데이터 조회 실패: {api.redact(e)}")
+                return None
+        for c in ranked:
+            f = fin.get(c, {})
+            a = auditors.get(c, {})
+            revenue = f.get("revenue")
+            op = f.get("operating_profit")
+            name, stock_code = info[c]
+            rows.append(
+                {
+                    "순위": rank_map[c],
+                    "연도": yr,
+                    "회사명": name,
+                    "종목코드": stock_code,
+                    "매출액(억원)": round(revenue / 1e8, 1) if revenue is not None else None,
+                    "영업이익(억원)": round(op / 1e8, 1) if op is not None else None,
+                    "감사인": a.get("adtor"),
+                    "감사의견": a.get("adt_opinion"),
+                }
+            )
+        progress.progress((i + 1) / len(years))
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# 분석 실행 (업종 내 매출액 상위 N개 자동 선정)
 # ---------------------------------------------------------------------------
 if run:
     companies = api.companies_in_industry(selected_induty)
@@ -148,9 +204,6 @@ if run:
         st.stop()
 
     corp_codes = [c[0] for c in companies]
-    name_map = {c[0]: c[1] for c in companies}
-    stock_map = {c[0]: c[2] for c in companies}
-
     with st.spinner(f"{base_year}년 매출액 기준 업종 내 {len(corp_codes)}개사 순위 계산 중... (배치 조회)"):
         try:
             base_fin = api.get_financials(api_key, corp_codes, str(base_year), reprt_code)
@@ -168,44 +221,55 @@ if run:
         st.warning(f"{base_year}년 {report_label} 매출액 데이터가 있는 회사가 없습니다. 연도나 보고서 종류를 바꿔보세요.")
         st.stop()
 
-    rank_map = {c: i for i, c in enumerate(ranked, start=1)}
+    df = _build_result(ranked, years, reprt_code)
+    if df is not None:
+        st.session_state["working_codes"] = ranked
+        st.session_state["result_df"] = df
+        st.session_state["result_meta"] = {
+            "industry": selected_label,
+            "base_year": str(base_year),
+            "years": years,
+            "reprt_code": reprt_code,
+            "report_label": report_label,
+        }
 
-    rows = []
-    progress = st.progress(0.0)
-    for i, yr in enumerate(years):
-        with st.spinner(f"{yr}년 매출액/영업이익/감사인 조회 중..."):
-            try:
-                fin = api.get_financials(api_key, ranked, yr, reprt_code)
-                auditors = api.get_auditors_bulk(api_key, ranked, yr, reprt_code)
-            except api.DartError as e:
-                st.error(f"{yr}년 데이터 조회 실패: {api.redact(e)}")
-                st.stop()
-        for c in ranked:
-            f = fin.get(c, {})
-            a = auditors.get(c, {})
-            revenue = f.get("revenue")
-            op = f.get("operating_profit")
-            rows.append(
-                {
-                    "순위": rank_map[c],
-                    "연도": yr,
-                    "회사명": name_map[c],
-                    "종목코드": stock_map[c],
-                    "매출액(억원)": round(revenue / 1e8, 1) if revenue is not None else None,
-                    "영업이익(억원)": round(op / 1e8, 1) if op is not None else None,
-                    "감사인": a.get("adtor"),
-                    "감사의견": a.get("adt_opinion"),
-                }
-            )
-        progress.progress((i + 1) / len(years))
+# ---------------------------------------------------------------------------
+# 회사 구성 편집 (추가/제외)
+# ---------------------------------------------------------------------------
+if "working_codes" in st.session_state:
+    st.header("회사 구성 편집")
+    st.caption("자동 선정된 목록에서 특정 회사를 빼거나, 업종 분류와 무관하게 원하는 회사를 추가할 수 있습니다.")
 
-    st.session_state["result_df"] = pd.DataFrame(rows)
-    st.session_state["result_meta"] = {
-        "industry": selected_label,
-        "base_year": str(base_year),
-        "years": years,
-        "report_label": report_label,
-    }
+    meta = st.session_state["result_meta"]
+    working_codes = st.session_state["working_codes"]
+    working_info = api.corp_info(working_codes)
+
+    edit_col1, edit_col2 = st.columns(2)
+    with edit_col1:
+        remove_names = st.multiselect(
+            "제외할 회사",
+            options=[working_info[c][0] for c in working_codes if c in working_info],
+        )
+    with edit_col2:
+        add_query = st.text_input("추가할 회사 검색", placeholder="예: NC, 엔씨소프트")
+        add_candidates = api.search_companies(add_query) if add_query else []
+        add_options = {f"{name} ({stock})": code for code, name, stock in add_candidates}
+        add_selected_labels = st.multiselect("검색 결과에서 추가할 회사 선택", options=list(add_options.keys()))
+
+    if st.button("✅ 구성 변경 적용", disabled=not api_key):
+        remove_codes = {c for c in working_codes if working_info.get(c, (None,))[0] in remove_names}
+        add_codes = [add_options[label] for label in add_selected_labels]
+        new_codes = [c for c in working_codes if c not in remove_codes] + [
+            c for c in add_codes if c not in working_codes
+        ]
+        if not new_codes:
+            st.warning("최소 1개 이상의 회사가 있어야 합니다.")
+        else:
+            df = _build_result(new_codes, meta["years"], meta["reprt_code"])
+            if df is not None:
+                st.session_state["working_codes"] = new_codes
+                st.session_state["result_df"] = df
+                st.rerun()
 
 # ---------------------------------------------------------------------------
 # 결과 표시
