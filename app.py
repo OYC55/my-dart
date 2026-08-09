@@ -174,8 +174,12 @@ if run:
     progress = st.progress(0.0)
     for i, yr in enumerate(years):
         with st.spinner(f"{yr}년 매출액/영업이익/감사인 조회 중..."):
-            fin = api.get_financials(api_key, ranked, yr, reprt_code)
-            auditors = api.get_auditors_bulk(api_key, ranked, yr, reprt_code)
+            try:
+                fin = api.get_financials(api_key, ranked, yr, reprt_code)
+                auditors = api.get_auditors_bulk(api_key, ranked, yr, reprt_code)
+            except api.DartError as e:
+                st.error(f"{yr}년 데이터 조회 실패: {e}")
+                st.stop()
         for c in ranked:
             f = fin.get(c, {})
             a = auditors.get(c, {})

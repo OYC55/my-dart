@@ -40,6 +40,10 @@ class DartError(Exception):
     """DART API가 status != '000' 을 반환했을 때"""
 
 
+class DartConnectionError(DartError):
+    """DART 서버에 아예 연결이 안 될 때(타임아웃 등). '데이터 없음'과 구분해 상위로 전파한다."""
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -74,9 +78,29 @@ def _check_status(payload: dict) -> None:
         raise DartError(f"[{status}] {payload.get('message', '알 수 없는 오류')}")
 
 
+def _request_with_retry(
+    url: str, params: dict, timeout: int = 20, retries: int = 3
+) -> requests.Response:
+    """일시적인 네트워크 문제(타임아웃 등)에 대비해 지수 백오프로 재시도한다."""
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise DartConnectionError(
+        f"DART 서버에 연결할 수 없습니다({retries}회 재시도 실패). "
+        f"배포 환경의 네트워크가 opendart.fss.or.kr 접속을 막고 있을 수 있습니다. "
+        f"원인: {last_exc}"
+    ) from last_exc
+
+
 def _get_json(path: str, params: dict, api_key: str, timeout: int = 20) -> dict:
-    r = requests.get(f"{BASE_URL}/{path}", params={**params, "crtfc_key": api_key}, timeout=timeout)
-    r.raise_for_status()
+    r = _request_with_retry(f"{BASE_URL}/{path}", {**params, "crtfc_key": api_key}, timeout=timeout)
     payload = r.json()
     _check_status(payload)
     return payload
@@ -113,8 +137,7 @@ def download_corp_codes(api_key: str, force: bool = False) -> int:
     if not force and corp_count() > 0:
         return corp_count()
 
-    r = requests.get(f"{BASE_URL}/corpCode.xml", params={"crtfc_key": api_key}, timeout=60)
-    r.raise_for_status()
+    r = _request_with_retry(f"{BASE_URL}/corpCode.xml", {"crtfc_key": api_key}, timeout=60)
 
     if not r.content.startswith(b"PK"):
         # zip이 아니면 에러 응답(xml)
@@ -361,6 +384,8 @@ def get_financials(
                     {"corp_code": ",".join(chunk), "bsns_year": bsns_year, "reprt_code": reprt_code},
                     api_key,
                 )
+            except DartConnectionError:
+                raise  # 네트워크 자체가 안 되는 경우는 조용히 넘어가지 않고 상위로 전파
             except DartError:
                 # 해당 청크에 데이터가 전혀 없는 경우 등 -> 빈 값으로 채움
                 for c in chunk:
@@ -418,6 +443,8 @@ def get_auditor(
                 adtor = " ".join(adtor.split())
             if adt_opinion:
                 adt_opinion = " ".join(adt_opinion.split())
+        except DartConnectionError:
+            raise
         except DartError:
             adtor, adt_opinion = None, None
 
